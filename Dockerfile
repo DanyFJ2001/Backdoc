@@ -12,7 +12,6 @@ WORKDIR /app
 COPY requirements.txt .
 COPY server.py .
 COPY index.html .
-COPY .env.example .
 
 # Instalar dependencias Python
 RUN pip install --no-cache-dir -r requirements.txt
