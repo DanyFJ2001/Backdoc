@@ -1,8 +1,9 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
-import fitz  # PyMuPDF
+from pdf2image import convert_from_bytes
 import base64
+import io
 from openai import OpenAI
 import requests
 import re
@@ -14,7 +15,11 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+# Configurar OpenRouter (compatible con API de OpenAI)
+client = OpenAI(
+    api_key=os.getenv('OPENROUTER_API_KEY'),
+    base_url="https://openrouter.ai/api/v1"
+)
 
 def extract_cedula_from_filename(filename):
     match = re.search(r'(\d{10})', filename)
@@ -35,21 +40,18 @@ def convert_pdf_to_images(pdf_bytes):
     try:
         print('  📄 Convirtiendo PDF a imágenes...')
         
-        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        # Convertir PDF a imágenes usando pdf2image
+        images = convert_from_bytes(pdf_bytes, dpi=200, fmt='png')
         
         base64_images = []
-        max_pages = min(pdf_document.page_count, 3)
+        max_pages = min(len(images), 3)
         
-        for page_num in range(max_pages):
-            page = pdf_document[page_num]
-            mat = fitz.Matrix(2.5, 2.5)
-            pix = page.get_pixmap(matrix=mat)
-            img_bytes = pix.pil_tobytes(format="PNG")
-            img_base64 = base64.b64encode(img_bytes).decode()
+        for i in range(max_pages):
+            buffered = io.BytesIO()
+            images[i].save(buffered, format="PNG")
+            img_base64 = base64.b64encode(buffered.getvalue()).decode()
             base64_images.append(img_base64)
-            print(f'  ✅ Página {page_num + 1} convertida')
-        
-        pdf_document.close()
+            print(f'  ✅ Página {i + 1} convertida')
         
         if not base64_images:
             raise Exception('No se pudieron extraer imágenes del PDF')
@@ -132,7 +134,7 @@ JSON:
         })
     
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="openai/gpt-4o",  # O usa "anthropic/claude-3.5-sonnet" que es más barato
         max_tokens=2500,
         temperature=0.1,
         messages=[{"role": "user", "content": content}]
@@ -219,12 +221,13 @@ def index():
     return send_from_directory('.', 'index.html')
 
 if __name__ == '__main__':
+    port = int(os.getenv('PORT', 3001))
     print("""
 ╔═══════════════════════════════════════════════╗
 ║   Procesador de Historias Clínicas           ║
 ║      ✅ PDF → Imágenes → GPT-4 Vision        ║
 ╚═══════════════════════════════════════════════╝
 
-🌐 http://localhost:3001
-    """)
-    app.run(host='0.0.0.0', port=3001, debug=False)
+🌐 http://0.0.0.0:{port}
+    """.format(port=port))
+    app.run(host='0.0.0.0', port=port, debug=False)
