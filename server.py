@@ -221,7 +221,7 @@ def index():
     return send_from_directory('.', 'index.html')
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 3001))
+    port = int(os.getenv('PORT', 10000))
     print("""
 ╔═══════════════════════════════════════════════╗
 ║   Procesador de Historias Clínicas           ║
