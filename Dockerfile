@@ -8,10 +8,9 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Copiar archivos
+# Copiar archivos necesarios
 COPY requirements.txt .
 COPY server.py .
-COPY index.html .
 
 # Instalar dependencias Python
 RUN pip install --no-cache-dir -r requirements.txt
