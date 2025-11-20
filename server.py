@@ -15,11 +15,9 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Configurar OpenRouter (compatible con API de OpenAI)
-client = OpenAI(
-    api_key=os.getenv('OPENROUTER_API_KEY'),
-    base_url="https://openrouter.ai/api/v1"
-)
+def get_openai_client():
+    """Obtener cliente OpenAI configurado"""
+    return OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 def extract_cedula_from_filename(filename):
     match = re.search(r'(\d{10})', filename)
@@ -133,8 +131,10 @@ JSON:
             }
         })
     
+    client = get_openai_client()
+    
     response = client.chat.completions.create(
-        model="openai/gpt-4o",  # O usa "anthropic/claude-3.5-sonnet" que es más barato
+        model="gpt-4o",
         max_tokens=2500,
         temperature=0.1,
         messages=[{"role": "user", "content": content}]
@@ -218,7 +218,13 @@ def process_clinical_history():
 
 @app.route('/')
 def index():
-    return send_from_directory('.', 'index.html')
+    return jsonify({
+        "status": "ok",
+        "message": "API de Procesador de Certificados Médicos",
+        "endpoints": {
+            "POST /api/process-clinical-history": "Procesar PDFs"
+        }
+    })
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 10000))
