@@ -1,0 +1,230 @@
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+import os
+import fitz  # PyMuPDF
+import base64
+from openai import OpenAI
+import requests
+import re
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
+def extract_cedula_from_filename(filename):
+    match = re.search(r'(\d{10})', filename)
+    return match.group(1) if match else None
+
+def get_cedula_info(cedula):
+    try:
+        response = requests.post(
+            'https://si.secap.gob.ec/sisecap/logeo_web/json/busca_persona_registro_civil.php',
+            data={'documento': cedula, 'tipo': 1},
+            timeout=5
+        )
+        return response.json()
+    except:
+        return None
+
+def convert_pdf_to_images(pdf_bytes):
+    try:
+        print('  📄 Convirtiendo PDF a imágenes...')
+        
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        base64_images = []
+        max_pages = min(pdf_document.page_count, 3)
+        
+        for page_num in range(max_pages):
+            page = pdf_document[page_num]
+            mat = fitz.Matrix(2.5, 2.5)
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.pil_tobytes(format="PNG")
+            img_base64 = base64.b64encode(img_bytes).decode()
+            base64_images.append(img_base64)
+            print(f'  ✅ Página {page_num + 1} convertida')
+        
+        pdf_document.close()
+        
+        if not base64_images:
+            raise Exception('No se pudieron extraer imágenes del PDF')
+        
+        return base64_images
+        
+    except Exception as e:
+        print(f'  ❌ Error convirtiendo: {str(e)}')
+        raise
+
+def process_pdf(pdf_bytes, filename):
+    cedula = extract_cedula_from_filename(filename)
+    cedula_info = None
+    
+    if cedula:
+        print(f'  ✓ Cédula: {cedula}')
+        cedula_info = get_cedula_info(cedula)
+    
+    images = convert_pdf_to_images(pdf_bytes)
+    
+    print(f'  🔄 Analizando {len(images)} página(s) con OpenAI Vision...')
+    
+    content = [
+        {
+            "type": "text",
+            "text": """Eres un experto extrayendo datos de certificados médicos ocupacionales.
+
+EXTRAE EXACTAMENTE:
+
+1. **aptitudMedica**: En sección "APTITUD MÉDICA" extrae: APTO / APTO EN OBSERVACIÓN / APTO CON LIMITACIONES / NO APTO
+
+2. **diagnostico1**: En sección "K. DIAGNÓSTICO" línea 1, la descripción completa (ej: "Enfermedad de múltiples válvulas, no especificada")
+
+3. **cie10_diagnostico1**: Código CIE-10 del diagnóstico 1 - SOLO código (ej: I089)
+
+4. **observaciones1**: Observaciones del diagnóstico 1. Puede estar en "Observación", "Limitación", o sección "E/M RECOMENDACIONES". Incluye antecedentes y recomendaciones relacionadas (ej: "Antecedente de Valvulopatía en corazón (quirúrgico)" o "Requiere valoración por Cardiología")
+
+5. **diagnostico2**: Segundo diagnóstico en "K. DIAGNÓSTICO" (ej: "Miopía")
+
+6. **cie10_diagnostico2**: Código CIE-10 diagnóstico 2 - SOLO código (ej: H521)
+
+7. **observaciones2**: Observaciones diagnóstico 2 (ej: "Utiliza lentes de corrección. Se reporta además presbicia y pterigión")
+
+8. **hallazgoMetabolico**: En "J. RESULTADOS EXÁMENES" busca valores metabólicos. Incluye valor numérico (ej: "Triglicéridos: 200.93 mg/dl")
+
+9. **hallazgoOsteomuscular**: En "I. EXAMEN FÍSICO" o resultados Rx busca problemas columna/articulaciones (ej: "Signo de espondiloartrosis lumbar")
+
+10. **otrosAntecedentes**: En "C. ANTECEDENTES PERSONALES" lista cirugías y alergias (ej: "Apendicectomía, Histerectomía" y "Reporta alergia a la Aspirina")
+
+REGLAS:
+- Copia texto EXACTO del documento
+- CIE-10: SOLO código (I089 NO "CIE-10: I089")
+- Incluye valores numéricos
+- Si no existe → "No especificado"
+- NO inventes datos
+
+JSON:
+{
+  "aptitudMedica": "...",
+  "diagnostico1": "...",
+  "cie10_diagnostico1": "...",
+  "observaciones1": "...",
+  "diagnostico2": "...",
+  "cie10_diagnostico2": "...",
+  "observaciones2": "...",
+  "hallazgoMetabolico": "...",
+  "hallazgoOsteomuscular": "...",
+  "otrosAntecedentes": "..."
+}"""
+        }
+    ]
+    
+    for img_base64 in images:
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/png;base64,{img_base64}",
+                "detail": "high"
+            }
+        })
+    
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=2500,
+        temperature=0.1,
+        messages=[{"role": "user", "content": content}]
+    )
+    
+    extracted_data = {
+        'aptitudMedica': 'No especificado',
+        'diagnostico1': 'No especificado',
+        'cie10_diagnostico1': 'No especificado',
+        'observaciones1': 'No especificado',
+        'diagnostico2': 'No especificado',
+        'cie10_diagnostico2': 'No especificado',
+        'observaciones2': 'No especificado',
+        'hallazgoMetabolico': 'No especificado',
+        'hallazgoOsteomuscular': 'No especificado',
+        'otrosAntecedentes': 'No especificado',
+    }
+    
+    try:
+        respuesta = response.choices[0].message.content
+        print(f'  📊 Respuesta: {respuesta[:100]}...')
+        
+        json_str = respuesta.strip()
+        json_str = json_str.replace('```json', '').replace('```', '').strip()
+        
+        parsed = json.loads(json_str)
+        extracted_data.update(parsed)
+        print('  ✅ JSON parseado correctamente')
+    except Exception as e:
+        print(f'  ⚠️  Error al parsear JSON: {str(e)}')
+    
+    return {
+        'fileName': filename,
+        'cedula': cedula or '-',
+        'nombre': cedula_info.get('nombres', '-') if cedula_info else '-',
+        'apellido': cedula_info.get('apellidos', '-') if cedula_info else '-',
+        **extracted_data
+    }
+
+@app.route('/api/process-clinical-history', methods=['POST'])
+def process_clinical_history():
+    try:
+        print('\n🔥 Nueva petición')
+        
+        if 'files' not in request.files:
+            return jsonify({'success': False, 'procesados': 0, 'errores': 1, 'data': []})
+        
+        files = request.files.getlist('files')
+        
+        if not files:
+            return jsonify({'success': False, 'procesados': 0, 'errores': 1, 'data': []})
+        
+        resultados = []
+        errores = []
+        
+        print(f'📄 {len(files)} archivo(s)')
+        
+        for file in files:
+            try:
+                print(f'\n  ⏳ {file.filename}')
+                pdf_bytes = file.read()
+                datos = process_pdf(pdf_bytes, file.filename)
+                resultados.append(datos)
+                print(f'  ✅ OK')
+            except Exception as error:
+                errores.append({'archivo': file.filename, 'error': str(error)})
+                print(f'  ❌ {str(error)}')
+        
+        print(f'\n✅ {len(resultados)} procesado(s) | ❌ {len(errores)} error(es)\n')
+        
+        return jsonify({
+            'success': True,
+            'procesados': len(resultados),
+            'errores': len(errores),
+            'data': resultados
+        })
+    
+    except Exception as error:
+        print(f'❌ Error general: {str(error)}')
+        return jsonify({'success': False, 'procesados': 0, 'errores': 1, 'data': []})
+
+@app.route('/')
+def index():
+    return send_from_directory('.', 'index.html')
+
+if __name__ == '__main__':
+    print("""
+╔═══════════════════════════════════════════════╗
+║   Procesador de Historias Clínicas           ║
+║      ✅ PDF → Imágenes → GPT-4 Vision        ║
+╚═══════════════════════════════════════════════╝
+
+🌐 http://localhost:3001
+    """)
+    app.run(host='0.0.0.0', port=3001, debug=False)
